@@ -120,6 +120,44 @@ def _is_assistant_message(obj: Dict[str, Any]) -> bool:
         return True
     return False
 
+def _infer_message_type(obj: Dict[str, Any]) -> str:
+    """
+    Infers message type (user, assistant_with_tools, tool_result, assistant_response, unclassified)
+    based on various heuristics, especially when 'role' field is missing or generic.
+    """
+    role = _lower(obj.get("role"))
+
+    # Explicit roles
+    if role == "user":
+        return "user"
+    if role in ("assistant", "model"):
+        if isinstance(obj.get("tool_calls"), list) and obj.get("tool_calls"):
+            return "assistant_with_tools"
+        return "assistant_response"
+    if role == "tool":
+        return "tool_result"
+
+    # Heuristics if role is missing or not specific enough
+    if isinstance(obj.get("tool_calls"), list) and obj.get("tool_calls"):
+        return "assistant_with_tools"
+    if isinstance(obj.get("tool_call_id"), str) and isinstance(obj.get("name"), str):
+        return "tool_result"
+    
+    # Check for user message content patterns
+    if isinstance(obj.get("content"), str) and not obj.get("tool_code"):
+        return "user"
+    if isinstance(obj.get("parts"), list):
+        for part in obj["parts"]:
+            if isinstance(part, dict) and part.get("text"):
+                return "user"
+
+    # Default to assistant response if nothing else matches (most common remaining case)
+    # or if we found any common indicator for assistant (e.g. from _is_assistant_message)
+    if _is_assistant_message(obj):
+        return "assistant_response"
+
+    return "unclassified"
+
 
 def _count_tool_calls_in_obj(obj: Any) -> int:
     """
@@ -282,15 +320,18 @@ def _extract_tool_name(obj: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def _parse_timestamp(ts: Any) -> Optional[dt.datetime]:
-    """Parse timestamp from various formats"""
+def _parse_timestamp(ts: Any, path: Optional[Path] = None) -> Optional[dt.datetime]:
+    """Parse timestamp from various formats, logging a warning if unparseable."""
     if isinstance(ts, (int, float)):
         return dt.datetime.fromtimestamp(ts)
     if isinstance(ts, str):
         try:
             return dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
         except (ValueError, AttributeError):
-            pass
+            if path:
+                print(f"Warning: Could not parse timestamp '{ts}' in file {path}", file=sys.stderr)
+            else:
+                print(f"Warning: Could not parse timestamp '{ts}'", file=sys.stderr)
     return None
 
 
@@ -549,83 +590,78 @@ def parse_gemini_json(path: Path) -> SessionStats:
 
     msgs = _flatten_gemini_messages(doc)
     if not msgs:
-        stats.tool_calls += _count_tool_calls_in_obj(doc)
+        print(f"DEBUG: No messages flattened for {path}", file=sys.stderr)
+        stats.tool_calls += _count_tool_calls_in_obj(doc) # Fallback, if whole doc is a tool call
         return stats
 
     pending_tools: Dict[str, Tuple[str, dt.datetime, Optional[str]]] = {}  # tool_call_id -> (tool_name, start_time, working_dir)
     current_prompt_iterations = 0
     last_user_prompt_time: Optional[dt.datetime] = None
 
-    for obj in msgs:
-        timestamp = _parse_timestamp(obj.get("timestamp"))
-        role = _lower(obj.get("role"))
+    for i, obj in enumerate(msgs):
+        raw_timestamp = obj.get("timestamp")
+        timestamp = _parse_timestamp(raw_timestamp, path)
+        message_type = _infer_message_type(obj)
+        
+        # Fallback to file mtime if message timestamp is missing/unparseable
+        event_timestamp_str = timestamp.isoformat() if timestamp else stats.mtime_iso
+        
+        print(f"DEBUG: Processing message {i} in {path.name}: inferred_type={message_type}, raw_role='{obj.get('role')}', timestamp={raw_timestamp}", file=sys.stderr)
 
-        if role == "user":
+        if message_type == "user":
             stats.prompts += 1
             if current_prompt_iterations > 0:
                 stats.iterations_per_prompt.append(current_prompt_iterations)
             current_prompt_iterations = 0
             last_user_prompt_time = timestamp
+            print(f"DEBUG: Found user prompt in {path.name}", file=sys.stderr)
 
-            if timestamp:
-                stats.trace_events.append(TraceEvent(
-                    timestamp=timestamp.isoformat(),
-                    event_type="user_prompt",
-                    coding_agent=stats.tool,
-                    session_id=stats.session_id,
-                ))
+            stats.trace_events.append(TraceEvent(
+                timestamp=event_timestamp_str,
+                event_type="user_prompt",
+                coding_agent=stats.tool,
+                session_id=stats.session_id,
+            ))
 
-        elif role in ("assistant", "model"):
+        elif message_type == "assistant_with_tools":
             stats.assistant_msgs += 1
             current_prompt_iterations += 1
             
-            tool_calls = obj.get("tool_calls")
-            if isinstance(tool_calls, list):
-                for tool_call in tool_calls:
-                    if isinstance(tool_call, dict):
-                        stats.tool_calls += 1
-                        tool_name = tool_call.get("name", "unknown")
-                        # Gemini doesn't always have a unique ID per call, so we'll have to improvise one
-                        tool_call_id = f"{tool_name}-{timestamp.isoformat() if timestamp else ''}"
-                        working_dir = _extract_working_dir(tool_call.get("arguments", {}))
+            tool_calls = obj["tool_calls"]
+            print(f"DEBUG: Found assistant with tool_calls in {path.name}", file=sys.stderr)
+            for tool_call in tool_calls:
+                if isinstance(tool_call, dict):
+                    stats.tool_calls += 1
+                    tool_name = tool_call.get("name", "unknown")
+                    # Gemini doesn't always have a unique ID per call, so we'll have to improvise one
+                    tool_call_id = f"{tool_name}-{event_timestamp_str}-{i}-{hash(json.dumps(tool_call, sort_keys=True))}" 
+                    working_dir = _extract_working_dir(tool_call.get("arguments", {}))
 
-                        if tool_name not in stats.tool_stats:
-                            stats.tool_stats[tool_name] = ToolStats()
-                        stats.tool_stats[tool_name].count += 1
+                    if tool_name not in stats.tool_stats:
+                        stats.tool_stats[tool_name] = ToolStats()
+                    stats.tool_stats[tool_name].count += 1
 
-                        if working_dir:
-                            stats.working_dirs.append(working_dir)
+                    if working_dir:
+                        stats.working_dirs.append(working_dir)
 
-                        if timestamp:
-                            pending_tools[tool_call_id] = (tool_name, timestamp, working_dir)
+                    if timestamp: # Only add to pending if we have a valid start timestamp
+                        pending_tools[tool_call_id] = (tool_name, timestamp, working_dir)
+                    else:
+                        print(f"DEBUG: Skipping pending tool tracking for {tool_name} due to missing timestamp in {path.name}", file=sys.stderr)
 
-                        if timestamp:
-                            stats.trace_events.append(TraceEvent(
-                                timestamp=timestamp.isoformat(),
-                                event_type="tool_call",
-                                coding_agent=stats.tool,
-                                tool_name=tool_name,
-                                working_dir=working_dir,
-                                session_id=stats.session_id,
-                            ))
-            else: # Not a tool call, so it's a regular assistant response
-                if last_user_prompt_time and timestamp:
-                    response_time = (timestamp - last_user_prompt_time).total_seconds()
-                    if response_time < 600:
-                        stats.prompt_response_times.append(response_time)
-
-                if timestamp:
                     stats.trace_events.append(TraceEvent(
-                        timestamp=timestamp.isoformat(),
-                        event_type="assistant_response",
+                        timestamp=event_timestamp_str,
+                        event_type="tool_call",
                         coding_agent=stats.tool,
+                        tool_name=tool_name,
+                        working_dir=working_dir,
                         session_id=stats.session_id,
                     ))
 
-        elif role == "tool":
+        elif message_type == "tool_result":
             tool_name = obj.get("name", "unknown")
-            # Try to find the matching tool call
-            # This is fragile because we don't have a stable ID. We'll find the most recent pending call with this name.
+            print(f"DEBUG: Found tool result for {tool_name} in {path.name}", file=sys.stderr)
+
             matching_call_id = None
             for call_id, (name, _, _) in reversed(list(pending_tools.items())):
                 if name == tool_name:
@@ -640,9 +676,9 @@ def parse_gemini_json(path: Path) -> SessionStats:
                         if tool_name not in stats.tool_stats:
                             stats.tool_stats[tool_name] = ToolStats()
                         stats.tool_stats[tool_name].execution_times.append(exec_time)
-
+                        print(f"DEBUG: Calculated tool execution time {exec_time:.2f}s for {tool_name} in {path.name}", file=sys.stderr)
                         stats.trace_events.append(TraceEvent(
-                            timestamp=timestamp.isoformat(),
+                            timestamp=event_timestamp_str,
                             event_type="tool_result",
                             coding_agent=stats.tool,
                             tool_name=tool_name,
@@ -650,7 +686,40 @@ def parse_gemini_json(path: Path) -> SessionStats:
                             working_dir=working_dir,
                             session_id=stats.session_id,
                         ))
+                    else:
+                        print(f"DEBUG: Tool execution time {exec_time:.2f}s for {tool_name} exceeded 60s, not recorded in stats in {path.name}", file=sys.stderr)
+                else:
+                    print(f"DEBUG: Missing timestamp or start_time for tool result {tool_name} in {path.name}. Cannot calculate execution time.", file=sys.stderr)
                 del pending_tools[matching_call_id]
+            else:
+                print(f"DEBUG: No matching pending tool call found for result {tool_name} in {path.name}", file=sys.stderr)
+                stats.trace_events.append(TraceEvent(
+                    timestamp=event_timestamp_str,
+                    event_type="tool_result",
+                    coding_agent=stats.tool,
+                    tool_name=tool_name,
+                    working_dir=stats.session_cwd, # Fallback to session cwd
+                    session_id=stats.session_id,
+                ))
+
+        elif message_type == "assistant_response":
+            stats.assistant_msgs += 1
+            current_prompt_iterations += 1
+            print(f"DEBUG: Found regular assistant response in {path.name}", file=sys.stderr)
+            if last_user_prompt_time and timestamp:
+                response_time = (timestamp - last_user_prompt_time).total_seconds()
+                if response_time < 600:
+                    stats.prompt_response_times.append(response_time)
+                    print(f"DEBUG: Calculated prompt response time {response_time:.2f}s in {path.name}", file=sys.stderr)
+
+            stats.trace_events.append(TraceEvent(
+                timestamp=event_timestamp_str,
+                event_type="assistant_response",
+                coding_agent=stats.tool,
+                session_id=stats.session_id,
+            ))
+        else: # Unclassified messages
+            print(f"DEBUG: Unclassified message in {path.name}: {obj}", file=sys.stderr)
 
 
     if current_prompt_iterations > 0:

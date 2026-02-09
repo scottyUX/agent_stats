@@ -28,8 +28,7 @@ def summarize_csv(csv_path):
     print("-----------")
     print("Total prompts:", prompts)
     print("Total tool calls:", tool_calls)
-    print("
-Average execution time per tool:")
+    print("\\nAverage execution time per tool:")
     for tool, times in tool_execution_times.items():
         avg_time = sum(times) / len(times)
         print(f"- {tool}: {avg_time:.3f}s")
