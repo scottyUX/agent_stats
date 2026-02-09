@@ -28,6 +28,14 @@ The `--filter` option allows you to focus analysis on specific projects (avoids 
 - `--filter "cse247b"` matches sessions where the project contains "cse247b"
 - `--filter "hagent"` matches paths like `.../hagent/core` or `.../hagent/foo/core`
 
+## Summarizing the Trace Data
+
+The `summarize_cli.py` script provides a summary of an `ai_usage_trace.csv` file.
+
+```bash
+./summarize_cli.py ai_usage_trace.csv
+```
+
 ## Agent Notifications
 
 The `hooks/` directory contains configuration files and scripts to set up visual/audio notifications for coding agent activity. See [hooks/README.md](hooks/README.md) for setup instructions on how to configure Claude Code to notify you when it's waiting for input or actively running.
