@@ -536,7 +536,7 @@ def _flatten_gemini_messages(doc: Any) -> List[Dict[str, Any]]:
 
 
 def parse_gemini_json(path: Path) -> SessionStats:
-    """Basic parser for Gemini CLI logs - simple counting only"""
+    """Enhanced parser for Gemini CLI logs with tool call and timing analysis."""
     stats = SessionStats(
         tool="gemini_cli",
         session_id=path.stem,
@@ -545,19 +545,116 @@ def parse_gemini_json(path: Path) -> SessionStats:
     )
     doc = _read_json(path)
 
-    # Extract session-level cwd/workdir if available
     stats.session_cwd = doc.get("cwd") or doc.get("workdir") or doc.get("working_dir")
 
     msgs = _flatten_gemini_messages(doc)
-    # If we found nothing, treat the whole document as one record for tool-call counting
     if not msgs:
         stats.tool_calls += _count_tool_calls_in_obj(doc)
         return stats
 
+    pending_tools: Dict[str, Tuple[str, dt.datetime, Optional[str]]] = {}  # tool_call_id -> (tool_name, start_time, working_dir)
+    current_prompt_iterations = 0
+    last_user_prompt_time: Optional[dt.datetime] = None
+
     for obj in msgs:
-        stats.prompts += 1 if _is_user_message(obj) else 0
-        stats.assistant_msgs += 1 if _is_assistant_message(obj) else 0
-        stats.tool_calls += _count_tool_calls_in_obj(obj)
+        timestamp = _parse_timestamp(obj.get("timestamp"))
+        role = _lower(obj.get("role"))
+
+        if role == "user":
+            stats.prompts += 1
+            if current_prompt_iterations > 0:
+                stats.iterations_per_prompt.append(current_prompt_iterations)
+            current_prompt_iterations = 0
+            last_user_prompt_time = timestamp
+
+            if timestamp:
+                stats.trace_events.append(TraceEvent(
+                    timestamp=timestamp.isoformat(),
+                    event_type="user_prompt",
+                    coding_agent=stats.tool,
+                    session_id=stats.session_id,
+                ))
+
+        elif role in ("assistant", "model"):
+            stats.assistant_msgs += 1
+            current_prompt_iterations += 1
+            
+            tool_calls = obj.get("tool_calls")
+            if isinstance(tool_calls, list):
+                for tool_call in tool_calls:
+                    if isinstance(tool_call, dict):
+                        stats.tool_calls += 1
+                        tool_name = tool_call.get("name", "unknown")
+                        # Gemini doesn't always have a unique ID per call, so we'll have to improvise one
+                        tool_call_id = f"{tool_name}-{timestamp.isoformat() if timestamp else ''}"
+                        working_dir = _extract_working_dir(tool_call.get("arguments", {}))
+
+                        if tool_name not in stats.tool_stats:
+                            stats.tool_stats[tool_name] = ToolStats()
+                        stats.tool_stats[tool_name].count += 1
+
+                        if working_dir:
+                            stats.working_dirs.append(working_dir)
+
+                        if timestamp:
+                            pending_tools[tool_call_id] = (tool_name, timestamp, working_dir)
+
+                        if timestamp:
+                            stats.trace_events.append(TraceEvent(
+                                timestamp=timestamp.isoformat(),
+                                event_type="tool_call",
+                                coding_agent=stats.tool,
+                                tool_name=tool_name,
+                                working_dir=working_dir,
+                                session_id=stats.session_id,
+                            ))
+            else: # Not a tool call, so it's a regular assistant response
+                if last_user_prompt_time and timestamp:
+                    response_time = (timestamp - last_user_prompt_time).total_seconds()
+                    if response_time < 600:
+                        stats.prompt_response_times.append(response_time)
+
+                if timestamp:
+                    stats.trace_events.append(TraceEvent(
+                        timestamp=timestamp.isoformat(),
+                        event_type="assistant_response",
+                        coding_agent=stats.tool,
+                        session_id=stats.session_id,
+                    ))
+
+        elif role == "tool":
+            tool_name = obj.get("name", "unknown")
+            # Try to find the matching tool call
+            # This is fragile because we don't have a stable ID. We'll find the most recent pending call with this name.
+            matching_call_id = None
+            for call_id, (name, _, _) in reversed(list(pending_tools.items())):
+                if name == tool_name:
+                    matching_call_id = call_id
+                    break
+            
+            if matching_call_id and matching_call_id in pending_tools:
+                _, start_time, working_dir = pending_tools[matching_call_id]
+                if timestamp and start_time:
+                    exec_time = (timestamp - start_time).total_seconds()
+                    if exec_time < 60:
+                        if tool_name not in stats.tool_stats:
+                            stats.tool_stats[tool_name] = ToolStats()
+                        stats.tool_stats[tool_name].execution_times.append(exec_time)
+
+                        stats.trace_events.append(TraceEvent(
+                            timestamp=timestamp.isoformat(),
+                            event_type="tool_result",
+                            coding_agent=stats.tool,
+                            tool_name=tool_name,
+                            execution_time=exec_time,
+                            working_dir=working_dir,
+                            session_id=stats.session_id,
+                        ))
+                del pending_tools[matching_call_id]
+
+
+    if current_prompt_iterations > 0:
+        stats.iterations_per_prompt.append(current_prompt_iterations)
 
     return stats
 
