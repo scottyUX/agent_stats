@@ -1,4 +1,3 @@
-
 ## Overview
 
 This repository contains scripts that collects and analyzes AI tool usage statistics from local log files of Claude Code, Codex CLI, and Gemini CLI. The script uses heuristics to parse various log formats and generates detailed statistics with per-tool breakdowns, execution times, and working directory tracking.
@@ -27,14 +26,6 @@ The `--filter` option allows you to focus analysis on specific projects (avoids 
 
 - `--filter "cse247b"` matches sessions where the project contains "cse247b"
 - `--filter "hagent"` matches paths like `.../hagent/core` or `.../hagent/foo/core`
-
-## Summarizing the Trace Data
-
-The `summarize_cli.py` script provides a summary of an `ai_usage_trace.csv` file.
-
-```bash
-./summarize_cli.py ai_usage_trace.csv
-```
 
 ## Agent Notifications
 
