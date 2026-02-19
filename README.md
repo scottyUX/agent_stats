@@ -1,4 +1,3 @@
-
 ## Overview
 
 This repository contains scripts that collects and analyzes AI tool usage statistics from local log files of Claude Code, Codex CLI, and Gemini CLI. The script uses heuristics to parse various log formats and generates detailed statistics with per-tool breakdowns, execution times, and working directory tracking.
