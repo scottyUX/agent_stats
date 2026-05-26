@@ -292,10 +292,26 @@ class SessionStats:
 # -----------------------------
 
 def _extract_user_text(obj: Dict[str, Any]) -> Optional[str]:
-    """Extract plain text from a user message object (not tool results)."""
+    """Extract plain text from a user message object across Claude, Codex, and Gemini formats."""
+    # Claude Code: obj["message"]["content"]
     content = obj.get("message", {}).get("content")
-    if isinstance(content, str):
-        return content.strip() or None
+    if isinstance(content, str) and content.strip():
+        return content.strip()
+    # Codex: obj["payload"]["content"] — string or list of content blocks
+    payload_content = obj.get("payload", {}).get("content")
+    if isinstance(payload_content, str) and payload_content.strip():
+        return payload_content.strip()
+    if isinstance(payload_content, list):
+        parts = [p.get("text", "") for p in payload_content if isinstance(p, dict) and p.get("type") == "text"]
+        text = " ".join(p for p in parts if p).strip()
+        if text:
+            return text
+    # Gemini: obj["parts"] — list of {"text": "..."}
+    parts = obj.get("parts")
+    if isinstance(parts, list):
+        text = " ".join(p.get("text", "") for p in parts if isinstance(p, dict) and p.get("text")).strip()
+        if text:
+            return text
     return None
 
 
@@ -511,7 +527,7 @@ def parse_claude_jsonl(path: Path, capture_messages: bool = False, capture_token
     return stats
 
 
-def parse_codex_jsonl(path: Path) -> SessionStats:
+def parse_codex_jsonl(path: Path, capture_messages: bool = False, capture_tokens: bool = False) -> SessionStats:
     """Parser for Codex CLI logs with tool call tracking"""
     stats = SessionStats(
         tool="codex_cli",
@@ -546,8 +562,38 @@ def parse_codex_jsonl(path: Path) -> SessionStats:
 
         timestamp = _parse_timestamp(obj.get("timestamp"))
 
-        stats.prompts += 1 if _is_user_message(obj) else 0
-        stats.assistant_msgs += 1 if _is_assistant_message(obj) else 0
+        if _is_user_message(obj):
+            stats.prompts += 1
+            if timestamp:
+                stats.trace_events.append(TraceEvent(
+                    timestamp=timestamp.isoformat(),
+                    event_type="user_prompt",
+                    coding_agent=stats.tool,
+                    session_id=stats.session_id,
+                    working_dir=stats.session_cwd,
+                    message_text=_extract_user_text(obj) if capture_messages else None,
+                ))
+
+        if _is_assistant_message(obj):
+            stats.assistant_msgs += 1
+            # Extract token usage from OpenAI usage format (prompt_tokens / completion_tokens)
+            token_event_kwargs: Dict[str, Any] = {}
+            if capture_tokens and isinstance(obj.get("payload"), dict):
+                usage = obj["payload"].get("usage")
+                if isinstance(usage, dict):
+                    token_event_kwargs = {
+                        "input_tokens": usage.get("prompt_tokens"),
+                        "output_tokens": usage.get("completion_tokens"),
+                        # No cache fields — OpenAI Codex does not expose prompt cache metrics
+                    }
+            if capture_tokens and token_event_kwargs and timestamp:
+                stats.trace_events.append(TraceEvent(
+                    timestamp=timestamp.isoformat(),
+                    event_type="assistant_response",
+                    coding_agent=stats.tool,
+                    session_id=stats.session_id,
+                    **token_event_kwargs,
+                ))
 
         # Detect Codex function_call format
         if isinstance(obj.get("payload"), dict):
@@ -628,7 +674,7 @@ def _flatten_gemini_messages(doc: Any) -> List[Dict[str, Any]]:
     return msgs
 
 
-def parse_gemini_json(path: Path) -> SessionStats:
+def parse_gemini_json(path: Path, capture_messages: bool = False, capture_tokens: bool = False) -> SessionStats:
     """Enhanced parser for Gemini CLI logs with tool call and timing analysis."""
     stats = SessionStats(
         tool="gemini_cli",
@@ -654,10 +700,10 @@ def parse_gemini_json(path: Path) -> SessionStats:
         raw_timestamp = obj.get("timestamp")
         timestamp = _parse_timestamp(raw_timestamp, path)
         message_type = _infer_message_type(obj)
-        
+
         # Fallback to file mtime if message timestamp is missing/unparseable
         event_timestamp_str = timestamp.isoformat() if timestamp else stats.mtime_iso
-        
+
         print(f"DEBUG: Processing message {i} in {path.name}: inferred_type={message_type}, raw_role='{obj.get('role')}', timestamp={raw_timestamp}", file=sys.stderr)
 
         if message_type == "user":
@@ -673,6 +719,7 @@ def parse_gemini_json(path: Path) -> SessionStats:
                 event_type="user_prompt",
                 coding_agent=stats.tool,
                 session_id=stats.session_id,
+                message_text=_extract_user_text(obj) if capture_messages else None,
             ))
 
         elif message_type == "assistant_with_tools":
@@ -773,9 +820,25 @@ def parse_gemini_json(path: Path) -> SessionStats:
         else: # Unclassified messages
             print(f"DEBUG: Unclassified message in {path.name}: {obj}", file=sys.stderr)
 
-
     if current_prompt_iterations > 0:
         stats.iterations_per_prompt.append(current_prompt_iterations)
+
+    # Extract aggregate token counts from Gemini usageMetadata (doc-level, not per-message)
+    # Gemini reports promptTokenCount / candidatesTokenCount; no cache metrics available.
+    if capture_tokens:
+        usage_meta = doc.get("usageMetadata", {})
+        total_input = usage_meta.get("promptTokenCount")
+        total_output = usage_meta.get("candidatesTokenCount")
+        if total_input or total_output:
+            stats.trace_events.append(TraceEvent(
+                timestamp=stats.mtime_iso or dt.datetime.now().isoformat(),
+                event_type="assistant_response",
+                coding_agent=stats.tool,
+                session_id=stats.session_id,
+                input_tokens=total_input,
+                output_tokens=total_output,
+                # No cache fields — Gemini does not expose prompt cache metrics
+            ))
 
     return stats
 
@@ -815,18 +878,18 @@ def classify_and_parse(path: Path, capture_messages: bool = False, capture_token
     if p.endswith(".jsonl") and ("/.claude/projects/" in p.replace("\\", "/") or "\\.claude\\projects\\" in p):
         return parse_claude_jsonl(path, capture_messages=capture_messages, capture_tokens=capture_tokens)
     if p.endswith(".jsonl") and ("/.codex/" in p.replace("\\", "/") or "\\.codex\\" in p) and "rollout-" in path.name:
-        return parse_codex_jsonl(path)
+        return parse_codex_jsonl(path, capture_messages=capture_messages, capture_tokens=capture_tokens)
     if p.endswith(".json") and ("/.gemini/tmp/" in p.replace("\\", "/") or "\\.gemini\\tmp\\" in p) and path.name.startswith("session-"):
-        return parse_gemini_json(path)
+        return parse_gemini_json(path, capture_messages=capture_messages, capture_tokens=capture_tokens)
 
     # Fallback by extension
     if p.endswith(".jsonl"):
         # Try both jsonl parsers; choose the one that yields non-zero totals
         a = parse_claude_jsonl(path, capture_messages=capture_messages, capture_tokens=capture_tokens)
-        b = parse_codex_jsonl(path)
+        b = parse_codex_jsonl(path, capture_messages=capture_messages, capture_tokens=capture_tokens)
         return a if (a.prompts + a.assistant_msgs + a.tool_calls) >= (b.prompts + b.assistant_msgs + b.tool_calls) else b
     if p.endswith(".json"):
-        return parse_gemini_json(path)
+        return parse_gemini_json(path, capture_messages=capture_messages, capture_tokens=capture_tokens)
 
     return None
 
