@@ -1,0 +1,19 @@
+{"session_id":"demo-session-01","working_dir":"/sample-repo/src/components","timestamp":"2026-05-01T14:00:00.000Z","event_type":"user_prompt"}
+{"session_id":"demo-session-01","working_dir":"/sample-repo/src/components","timestamp":"2026-05-01T14:00:05.000Z","event_type":"tool_call","tool_name":"Read","tool_input":"{\"file_path\":\"src/components/Button.tsx\"}"}
+{"session_id":"demo-session-01","working_dir":"/sample-repo/src/components","timestamp":"2026-05-01T14:00:12.000Z","event_type":"tool_call","tool_name":"Grep","tool_input":"pattern variant"}
+{"session_id":"demo-session-01","working_dir":"/sample-repo/src/components","timestamp":"2026-05-01T14:00:28.000Z","event_type":"tool_call","tool_name":"Write","tool_input":"{\"file_path\":\"src/components/Button.tsx\"}"}
+{"session_id":"demo-session-01","working_dir":"/sample-repo/src/components","timestamp":"2026-05-01T14:00:35.000Z","event_type":"tool_call","tool_name":"Read","tool_input":"{\"file_path\":\"src/components/Button.tsx\"}"}
+{"session_id":"demo-session-01","working_dir":"/sample-repo/src/components","timestamp":"2026-05-01T14:00:42.000Z","event_type":"tool_call","tool_name":"Bash","tool_input":"npm test -- --run src/components/Button.test.tsx"}
+{"session_id":"demo-session-01","working_dir":"/sample-repo/src/components","timestamp":"2026-05-01T14:00:43.000Z","usage":{"input_tokens":4200,"output_tokens":980,"reasoning_tokens":120}}
+{"session_id":"demo-session-02","working_dir":"/sample-repo/src/lib","timestamp":"2026-05-01T15:10:00.000Z","event_type":"user_prompt"}
+{"session_id":"demo-session-02","working_dir":"/sample-repo/src/lib","timestamp":"2026-05-01T15:10:08.000Z","event_type":"tool_call","tool_name":"Write","tool_input":"{\"file_path\":\"src/lib/quick-fix.ts\"}"}
+{"session_id":"demo-session-02","working_dir":"/sample-repo/src/lib","timestamp":"2026-05-01T15:10:15.000Z","event_type":"tool_call","tool_name":"Read","tool_input":"{\"file_path\":\"src/lib/quick-fix.ts\"}"}
+{"session_id":"demo-session-02","working_dir":"/sample-repo/src/lib","timestamp":"2026-05-01T15:10:16.000Z","usage":{"input_tokens":2100,"output_tokens":640}}
+{"session_id":"demo-session-03","working_dir":"/sample-repo/src/components","timestamp":"2026-05-01T16:20:00.000Z","event_type":"user_prompt"}
+{"session_id":"demo-session-03","working_dir":"/sample-repo/src/components","timestamp":"2026-05-01T16:20:03.000Z","event_type":"tool_call","tool_name":"Edit","tool_input":"{\"file_path\":\"src/components/Broken.tsx\"}"}
+{"session_id":"demo-session-03","working_dir":"/sample-repo/src/components","timestamp":"2026-05-01T16:20:06.000Z","event_type":"tool_result","tool_name":"Edit","is_error":true,"tool_input":"/sample-repo/src/components/Broken.tsx"}
+{"session_id":"demo-session-03","working_dir":"/sample-repo/src/components","timestamp":"2026-05-01T16:20:09.000Z","event_type":"tool_call","tool_name":"Edit","tool_input":"{\"file_path\":\"src/components/Broken.tsx\"}"}
+{"session_id":"demo-session-03","working_dir":"/sample-repo/src/components","timestamp":"2026-05-01T16:20:12.000Z","event_type":"tool_result","tool_name":"Edit","is_error":true,"tool_input":"/sample-repo/src/components/Broken.tsx"}
+{"session_id":"demo-session-03","working_dir":"/sample-repo/src/components","timestamp":"2026-05-01T16:20:15.000Z","event_type":"tool_call","tool_name":"Edit","tool_input":"{\"file_path\":\"src/components/Broken.tsx\"}"}
+{"session_id":"demo-session-03","working_dir":"/sample-repo/src/components","timestamp":"2026-05-01T16:20:30.000Z","event_type":"tool_call","tool_name":"Glob","tool_input":"**/*.tsx"}
+{"session_id":"demo-session-03","working_dir":"/sample-repo/src/components","timestamp":"2026-05-01T16:20:31.000Z","usage":{"input_tokens":8900,"output_tokens":1200}}
