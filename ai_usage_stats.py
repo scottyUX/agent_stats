@@ -438,14 +438,14 @@ def parse_claude_jsonl(path: Path, capture_messages: bool = False, capture_token
                 current_prompt_iterations = 0
                 last_user_prompt_time = timestamp
 
-                if timestamp:
-                    stats.trace_events.append(TraceEvent(
-                        timestamp=timestamp.isoformat(),
-                        event_type="user_prompt",
-                        coding_agent=stats.tool,
-                        session_id=stats.session_id,
-                        message_text=_extract_user_text(obj) if capture_messages else None,
-                    ))
+                stats.trace_events.append(TraceEvent(
+                    timestamp=timestamp.isoformat() if timestamp else "",
+                    event_type="user_prompt",
+                    coding_agent=stats.tool,
+                    session_id=stats.session_id,
+                    working_dir=stats.session_cwd,
+                    message_text=_extract_user_text(obj) if capture_messages else None,
+                ))
 
         # Check if this is an assistant message
         elif _is_assistant_message(obj):
@@ -473,15 +473,14 @@ def parse_claude_jsonl(path: Path, capture_messages: bool = False, capture_token
                         if tool_use_id and timestamp:
                             pending_tools[tool_use_id] = (tool_name, timestamp, working_dir)
 
-                        if timestamp:
-                            stats.trace_events.append(TraceEvent(
-                                timestamp=timestamp.isoformat(),
-                                event_type="tool_call",
-                                coding_agent=stats.tool,
-                                tool_name=tool_name,
-                                working_dir=working_dir,
-                                session_id=stats.session_id,
-                            ))
+                        stats.trace_events.append(TraceEvent(
+                            timestamp=timestamp.isoformat() if timestamp else "",
+                            event_type="tool_call",
+                            coding_agent=stats.tool,
+                            tool_name=tool_name,
+                            working_dir=working_dir or stats.session_cwd,
+                            session_id=stats.session_id,
+                        ))
 
             # Extract token usage (Claude Code JSONL only, when --tokens requested)
             token_event_kwargs: Dict[str, Any] = {}
