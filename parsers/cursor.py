@@ -70,16 +70,24 @@ def _classify(obj: Dict) -> Optional[str]:
 
     Returns one of: "user_prompt", "tool_call", "assistant_response", or None
     to skip the line (e.g. tool_result rows, which the dashboard does not use).
+
+    Handles both native Cursor format (role/type fields) and pre-processed
+    format where event_type is set explicitly.
     """
     role = obj.get("role")
     kind = obj.get("type")
+    event_type = obj.get("event_type")
 
-    if role == "user":
+    if role == "user" or event_type == "user_prompt":
         return "user_prompt"
-    if role == "assistant":
+    if role == "assistant" or event_type == "assistant_response":
         return "assistant_response"
-    if kind == "tool_call":
+    if kind == "tool_call" or event_type == "tool_call":
         return "tool_call"
+    if event_type == "tool_result":
+        return None  # skip tool results
+    if "usage" in obj and role is None and kind is None and event_type is None:
+        return "assistant_response"
     return None
 
 

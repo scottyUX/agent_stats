@@ -26,6 +26,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+sys.path.insert(0, str(Path(__file__).parent))
+try:
+    from parsers.cursor import parse_cursor_jsonl as _parse_cursor_jsonl, find_cursor_logs as _find_cursor_logs
+    _CURSOR_AVAILABLE = True
+except ImportError:
+    _CURSOR_AVAILABLE = False
+
 
 # -----------------------------
 # Utilities
@@ -842,6 +849,74 @@ def parse_gemini_json(path: Path, capture_messages: bool = False, capture_tokens
     return stats
 
 
+def parse_cursor_session(path: Path, capture_messages: bool = False, capture_tokens: bool = False) -> SessionStats:
+    stats = SessionStats(
+        tool="cursor",
+        session_id=path.stem,
+        file=str(path),
+        mtime_iso=_iso_from_mtime(path),
+    )
+
+    for row in _parse_cursor_jsonl(path):
+        event_type = row["event_type"]
+        timestamp = row.get("timestamp", "")
+        tool_name = row.get("tool_name") or None
+        working_dir = row.get("working_dir") or None
+        session_id = row.get("session_id") or stats.session_id
+
+        if not stats.session_cwd and working_dir:
+            stats.session_cwd = working_dir
+
+        if event_type == "user_prompt":
+            stats.prompts += 1
+            stats.trace_events.append(TraceEvent(
+                timestamp=timestamp,
+                event_type="user_prompt",
+                coding_agent="cursor",
+                session_id=session_id,
+                working_dir=working_dir or stats.session_cwd,
+                message_text=row.get("message_text") if capture_messages else None,
+            ))
+
+        elif event_type == "tool_call":
+            stats.tool_calls += 1
+            if tool_name:
+                if tool_name not in stats.tool_stats:
+                    stats.tool_stats[tool_name] = ToolStats()
+                stats.tool_stats[tool_name].count += 1
+            if working_dir:
+                stats.working_dirs.append(working_dir)
+            stats.trace_events.append(TraceEvent(
+                timestamp=timestamp,
+                event_type="tool_call",
+                coding_agent="cursor",
+                tool_name=tool_name,
+                working_dir=working_dir or stats.session_cwd,
+                session_id=session_id,
+            ))
+
+        elif event_type == "assistant_response":
+            stats.assistant_msgs += 1
+            token_kwargs: Dict[str, Any] = {}
+            if capture_tokens:
+                token_kwargs = {
+                    "input_tokens": int(row["input_tokens"]) if row.get("input_tokens") else None,
+                    "output_tokens": int(row["output_tokens"]) if row.get("output_tokens") else None,
+                    "cache_creation_tokens": int(row["cache_creation_tokens"]) if row.get("cache_creation_tokens") else None,
+                    "cache_read_tokens": int(row["cache_read_tokens"]) if row.get("cache_read_tokens") else None,
+                    "model": row.get("model") or None,
+                }
+            stats.trace_events.append(TraceEvent(
+                timestamp=timestamp,
+                event_type="assistant_response",
+                coding_agent="cursor",
+                session_id=session_id,
+                **token_kwargs,
+            ))
+
+    return stats
+
+
 # -----------------------------
 # Discovery
 # -----------------------------
@@ -858,10 +933,13 @@ def discover_default_paths() -> List[Tuple[str, List[Path]]]:
     codex = [Path(p) for p in glob.glob(codex_glob, recursive=True)]
     gemini = [Path(p) for p in glob.glob(gemini_glob, recursive=True)]
 
+    cursor = _find_cursor_logs() if _CURSOR_AVAILABLE else []
+
     return [
         ("claude_code", claude),
         ("codex_cli", codex),
         ("gemini_cli", gemini),
+        ("cursor", cursor),
     ]
 
 
@@ -874,12 +952,15 @@ def discover_from_roots(roots: List[str]) -> List[Path]:
 
 def classify_and_parse(path: Path, capture_messages: bool = False, capture_tokens: bool = False) -> Optional[SessionStats]:
     p = str(path)
-    if p.endswith(".jsonl") and ("/.claude/projects/" in p.replace("\\", "/") or "\\.claude\\projects\\" in p):
+    p_norm = p.replace("\\", "/")
+    if p.endswith(".jsonl") and ("/.claude/projects/" in p_norm or "\\.claude\\projects\\" in p):
         return parse_claude_jsonl(path, capture_messages=capture_messages, capture_tokens=capture_tokens)
-    if p.endswith(".jsonl") and ("/.codex/" in p.replace("\\", "/") or "\\.codex\\" in p) and "rollout-" in path.name:
+    if p.endswith(".jsonl") and ("/.codex/" in p_norm or "\\.codex\\" in p) and "rollout-" in path.name:
         return parse_codex_jsonl(path, capture_messages=capture_messages, capture_tokens=capture_tokens)
-    if p.endswith(".json") and ("/.gemini/tmp/" in p.replace("\\", "/") or "\\.gemini\\tmp\\" in p) and path.name.startswith("session-"):
+    if p.endswith(".json") and ("/.gemini/tmp/" in p_norm or "\\.gemini\\tmp\\" in p) and path.name.startswith("session-"):
         return parse_gemini_json(path, capture_messages=capture_messages, capture_tokens=capture_tokens)
+    if p.endswith(".jsonl") and "/Cursor/" in p_norm and _CURSOR_AVAILABLE:
+        return parse_cursor_session(path, capture_messages=capture_messages, capture_tokens=capture_tokens)
 
     # Fallback by extension
     if p.endswith(".jsonl"):
