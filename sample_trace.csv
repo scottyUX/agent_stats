@@ -1,0 +1,17 @@
+timestamp,event_type,coding_agent,tool_name,execution_time,working_dir,session_id
+2026-05-01T14:00:00.000Z,user_prompt,claude_code,,,/sample-repo/src/components,demo-session-01
+2026-05-01T14:00:05.000Z,tool_call,claude_code,Read,,/sample-repo/src/components,demo-session-01
+2026-05-01T14:00:12.000Z,tool_call,claude_code,Grep,,/sample-repo/src/components,demo-session-01
+2026-05-01T14:00:28.000Z,tool_call,claude_code,Write,,/sample-repo/src/components,demo-session-01
+2026-05-01T14:00:35.000Z,tool_call,claude_code,Read,,/sample-repo/src/components,demo-session-01
+2026-05-01T14:00:42.000Z,tool_call,claude_code,Bash,,/sample-repo/src/components,demo-session-01
+2026-05-01T15:10:00.000Z,user_prompt,claude_code,,,/sample-repo/src/lib,demo-session-02
+2026-05-01T15:10:08.000Z,tool_call,claude_code,Write,,/sample-repo/src/lib,demo-session-02
+2026-05-01T15:10:15.000Z,tool_call,claude_code,Read,,/sample-repo/src/lib,demo-session-02
+2026-05-01T16:20:00.000Z,user_prompt,claude_code,,,/sample-repo/src/components,demo-session-03
+2026-05-01T16:20:03.000Z,tool_call,claude_code,Edit,,/sample-repo/src/components,demo-session-03
+2026-05-01T16:20:06.000Z,tool_result,claude_code,Edit,3.0,/sample-repo/src/components,demo-session-03
+2026-05-01T16:20:09.000Z,tool_call,claude_code,Edit,,/sample-repo/src/components,demo-session-03
+2026-05-01T16:20:12.000Z,tool_result,claude_code,Edit,3.0,/sample-repo/src/components,demo-session-03
+2026-05-01T16:20:15.000Z,tool_call,claude_code,Edit,,/sample-repo/src/components,demo-session-03
+2026-05-01T16:20:30.000Z,tool_call,claude_code,Glob,,/sample-repo/src/components,demo-session-03
