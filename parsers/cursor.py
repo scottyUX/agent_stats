@@ -1,5 +1,29 @@
+"""
+Cursor JSONL log parser.
+
+Reads Cursor agent-transcript logs (one JSON object per line) and yields
+normalized rows compatible with the ai_usage_trace.csv format the dashboard
+expects.
+
+Actual log format (each line is one of):
+  {"role": "user",      "message": {"content": [{"type": "text", "text": "..."}]}}
+  {"role": "assistant", "message": {"content": [{"type": "tool_use", "name": "Shell",
+                                                  "input": {"working_directory": "...", ...}}]}}
+  {"type": "turn_ended", "status": "success"}
+
+Fields that do NOT appear in this format and will always be empty:
+  timestamp, execution_time, input_tokens, output_tokens,
+  cache_creation_tokens, cache_read_tokens, model
+
+session_id is derived from the filename stem (one file = one session).
+
+Default log locations on macOS:
+  ~/Library/Application Support/Cursor/User/workspaceStorage/*/agent-transcripts/*.jsonl
+  ~/Library/Application Support/Cursor/logs/*.jsonl
+"""
+
 import json
-import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional
@@ -11,6 +35,7 @@ CSV_HEADERS: List[str] = [
     "tool_name",
     "execution_time",
     "working_dir",
+    "repo_root",
     "session_id",
     "message_text",
     "input_tokens",
@@ -20,38 +45,63 @@ CSV_HEADERS: List[str] = [
     "model",
 ]
 
-# Cursor tool names
+# Map snake_case Cursor tool names to dashboard canonical names.
+# PascalCase names (used in newer Cursor versions) pass through unchanged.
 _TOOL_ALIASES: Dict[str, str] = {
     "read_file": "Read",
     "edit_file": "Edit",
     "create_file": "Write",
-    "run_terminal_cmd": "Bash",
+    "run_terminal_cmd": "Shell",
     "grep_search": "Grep",
     "file_search": "Glob",
     "list_dir": "Glob",
     "codebase_search": "codebase_search",
     "web_search": "WebSearch",
-    "delete_file": "Bash",
+    "delete_file": "Shell",
 }
 
-# Default search roots for Cursor logs on macOS
 _DEFAULT_ROOTS_MAC: List[Path] = [
-    Path.home() / "Library" / "Application Support" / "Cursor" / "User" / "workspaceStorage",
+    Path.home()
+    / "Library"
+    / "Application Support"
+    / "Cursor"
+    / "User"
+    / "workspaceStorage",
     Path.home() / "Library" / "Application Support" / "Cursor" / "logs",
 ]
+
+
+def _get_repo_root(working_dir: str) -> str:
+    """Return the git repo root for working_dir, or '' if not in a repo or path missing."""
+    if not working_dir:
+        return ""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=working_dir,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except (FileNotFoundError, NotADirectoryError, subprocess.TimeoutExpired, OSError):
+        pass
+    return ""
 
 
 def _canonical_tool(raw_name: str) -> str:
     return _TOOL_ALIASES.get(raw_name, raw_name)
 
 
-def _safe_str(value: object) -> str:
-    """Return a CSV-safe string: strip commas and leading/trailing whitespace."""
-    return str(value).replace(",", " ").strip()
+def _csv_field(value: str) -> str:
+    """Wrap value in double-quotes if it contains commas, newlines, or quotes."""
+    if "," in value or "\n" in value or '"' in value:
+        return '"' + value.replace('"', '""') + '"'
+    return value
 
 
 def _parse_line(line: str) -> Optional[Dict]:
-    """Return parsed JSON object or None if the line is blank or invalid."""
     stripped = line.strip()
     if not stripped:
         return None
@@ -64,80 +114,29 @@ def _parse_line(line: str) -> Optional[Dict]:
         return None
 
 
-def _classify(obj: Dict) -> Optional[str]:
-    """
-    Map a Cursor log object to an event_type string.
-
-    Returns one of: "user_prompt", "tool_call", "assistant_response", or None
-    to skip the line (e.g. tool_result rows, which the dashboard does not use).
-
-    Handles both native Cursor format (role/type fields) and pre-processed
-    format where event_type is set explicitly.
-    """
-    role = obj.get("role")
-    kind = obj.get("type")
-    event_type = obj.get("event_type")
-
-    if role == "user" or event_type == "user_prompt":
-        return "user_prompt"
-    if role == "assistant" or event_type == "assistant_response":
-        return "assistant_response"
-    if kind == "tool_call" or event_type == "tool_call":
-        return "tool_call"
-    if event_type == "tool_result":
-        return None  # skip tool results
-    if "usage" in obj and role is None and kind is None and event_type is None:
-        return "assistant_response"
-    return None
-
-
-def _row_from_obj(obj: Dict, event_type: str) -> Dict[str, str]:
-    """Build one CSV row dict from a parsed Cursor log object."""
-    timestamp = _safe_str(obj.get("timestamp", ""))
-    session_id = _safe_str(obj.get("session_id", ""))
-    working_dir = _safe_str(obj.get("working_dir", ""))
-    model = _safe_str(obj.get("model", ""))
-
-    tool_name = ""
-    message_text = ""
-    input_tokens = ""
-    output_tokens = ""
-    cache_creation_tokens = ""
-    cache_read_tokens = ""
-
-    if event_type == "user_prompt":
-        message_text = _safe_str(obj.get("content", obj.get("text", "")))
-
-    elif event_type == "tool_call":
-        raw_tool = obj.get("tool", obj.get("name", ""))
-        tool_name = _canonical_tool(_safe_str(raw_tool))
-
-    elif event_type == "assistant_response":
-        usage = obj.get("usage") or {}
-    
-        input_tokens = str(
-            usage.get("input_tokens", usage.get("prompt_tokens", ""))
-        )
-        output_tokens = str(
-            usage.get("output_tokens", usage.get("completion_tokens", ""))
-        )
-        cache_creation_tokens = str(usage.get("cache_creation_tokens", ""))
-        cache_read_tokens = str(usage.get("cache_read_tokens", ""))
-
+def _make_row(
+    event_type: str,
+    session_id: str,
+    tool_name: str = "",
+    working_dir: str = "",
+    repo_root: str = "",
+    message_text: str = "",
+) -> Dict[str, str]:
     return {
-        "timestamp": timestamp,
+        "timestamp": "",
         "event_type": event_type,
         "coding_agent": "cursor",
         "tool_name": tool_name,
         "execution_time": "",
         "working_dir": working_dir,
+        "repo_root": repo_root,
         "session_id": session_id,
         "message_text": message_text,
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "cache_creation_tokens": cache_creation_tokens,
-        "cache_read_tokens": cache_read_tokens,
-        "model": model,
+        "input_tokens": "",
+        "output_tokens": "",
+        "cache_creation_tokens": "",
+        "cache_read_tokens": "",
+        "model": "",
     }
 
 
@@ -147,12 +146,14 @@ def parse_cursor_jsonl(
     verbose: bool = False,
 ) -> Iterator[Dict[str, str]]:
     """
-    Yield one CSV row dict per relevant event in a Cursor JSONL log file.
+    Yield one CSV row dict per relevant event in a Cursor JSONL transcript file.
 
-    Skips blank lines, malformed JSON, and tool_result lines silently.
-    Never raises on bad input — it logs a warning to stderr when verbose=True.
+    Skips blank lines, malformed JSON, and turn_ended lines silently.
+    Each assistant message with tool_use blocks yields one row per tool call.
+    Never raises on bad input.
     """
     path = Path(path)
+    session_id = path.stem
     bad_lines = 0
 
     with open(path, encoding="utf-8", errors="replace") as fh:
@@ -168,11 +169,47 @@ def parse_cursor_jsonl(
                         )
                 continue
 
-            event_type = _classify(obj)
-            if event_type is None:
-                continue
+            role = obj.get("role")
 
-            yield _row_from_obj(obj, event_type)
+            if role == "user":
+                message = obj.get("message") or {}
+                content = message.get("content") or []
+                texts = [
+                    block.get("text", "")
+                    for block in content
+                    if isinstance(block, dict) and block.get("type") == "text"
+                ]
+                message_text = " ".join(t for t in texts if t).strip()
+                yield _make_row("user_prompt", session_id, message_text=message_text)
+
+            elif role == "assistant":
+                message = obj.get("message") or {}
+                content = message.get("content") or []
+                if not isinstance(content, list):
+                    content = []
+
+                tool_uses = [
+                    block
+                    for block in content
+                    if isinstance(block, dict) and block.get("type") == "tool_use"
+                ]
+
+                if tool_uses:
+                    for block in tool_uses:
+                        tool_input = block.get("input") or {}
+                        working_dir = str(tool_input.get("working_directory", "")).strip()
+                        tool_name = _canonical_tool(str(block.get("name", "")).strip())
+                        yield _make_row(
+                            "tool_call",
+                            session_id,
+                            tool_name=tool_name,
+                            working_dir=working_dir,
+                            repo_root=_get_repo_root(working_dir),
+                        )
+                else:
+                    yield _make_row("assistant_response", session_id)
+
+            # role is None / type == "turn_ended" / anything else → skip
 
     if bad_lines and verbose:
         print(
@@ -185,10 +222,10 @@ def find_cursor_logs(roots: Optional[List[Path]] = None) -> List[Path]:
     """
     Return all *.jsonl files under the given roots (default: macOS Cursor paths).
 
-    skip roots that do not exist.
+    Silently skips roots that do not exist.
     """
     search_roots = roots if roots is not None else _DEFAULT_ROOTS_MAC
-    found: list[Path] = []
+    found: List[Path] = []
     for root in search_roots:
         if not root.exists():
             continue
@@ -197,8 +234,8 @@ def find_cursor_logs(roots: Optional[List[Path]] = None) -> List[Path]:
 
 
 def rows_to_csv(rows: List[Dict[str, str]]) -> str:
-    """Serialize a list of row dicts to a CSV string (headers + data)."""
+    """Serialize a list of row dicts to a RFC-4180-compatible CSV string."""
     lines = [",".join(CSV_HEADERS)]
     for row in rows:
-        lines.append(",".join(row.get(h, "") for h in CSV_HEADERS))
+        lines.append(",".join(_csv_field(row.get(h, "")) for h in CSV_HEADERS))
     return "\n".join(lines) + "\n"
