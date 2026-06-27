@@ -859,7 +859,7 @@ def parse_cursor_session(path: Path, capture_messages: bool = False, capture_tok
 
     for row in _parse_cursor_jsonl(path):
         event_type = row["event_type"]
-        timestamp = row.get("timestamp", "")
+        timestamp = row.get("timestamp") or stats.mtime_iso
         tool_name = row.get("tool_name") or None
         working_dir = row.get("working_dir") or None
         session_id = row.get("session_id") or stats.session_id
@@ -950,6 +950,17 @@ def discover_from_roots(roots: List[str]) -> List[Path]:
     return out
 
 
+def _is_cursor_jsonl(path: Path) -> bool:
+    if not _CURSOR_AVAILABLE or not str(path).endswith(".jsonl"):
+        return False
+    p = str(path).replace("\\", "/")
+    return (
+        "/agent-transcripts/" in p
+        or "/.cursor/projects/" in p
+        or "/Cursor/" in p
+    )
+
+
 def classify_and_parse(path: Path, capture_messages: bool = False, capture_tokens: bool = False) -> Optional[SessionStats]:
     p = str(path)
     p_norm = p.replace("\\", "/")
@@ -959,7 +970,7 @@ def classify_and_parse(path: Path, capture_messages: bool = False, capture_token
         return parse_codex_jsonl(path, capture_messages=capture_messages, capture_tokens=capture_tokens)
     if p.endswith(".json") and ("/.gemini/tmp/" in p_norm or "\\.gemini\\tmp\\" in p) and path.name.startswith("session-"):
         return parse_gemini_json(path, capture_messages=capture_messages, capture_tokens=capture_tokens)
-    if p.endswith(".jsonl") and "/Cursor/" in p_norm and _CURSOR_AVAILABLE:
+    if _is_cursor_jsonl(path):
         return parse_cursor_session(path, capture_messages=capture_messages, capture_tokens=capture_tokens)
 
     # Fallback by extension
